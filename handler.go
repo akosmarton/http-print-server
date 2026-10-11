@@ -1,11 +1,18 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
+)
+
+var (
+	maxBodyBytes int64 = 1 << 20 // 1 MiB POST body limit
+	pollTimeout        = 60 * time.Second
+	shutdownCh         = make(chan struct{})
 )
 
 func healthHandler(c echo.Context) error {
@@ -14,41 +21,55 @@ func healthHandler(c echo.Context) error {
 }
 
 func postJob(c echo.Context) error {
-	b, err := io.ReadAll(c.Request().Body)
-	if err != nil {
-		return err
-	}
-
 	jobs := jobQueue.Get(c.Param("printer"))
 	if jobs == nil {
-		return c.String(http.StatusNotFound, "Printer not found")
+		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
 	}
 
+	r := http.MaxBytesReader(c.Response(), c.Request().Body, maxBodyBytes)
+	b, err := io.ReadAll(r)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "payload too large")
+		}
+		return echo.NewHTTPError(http.StatusBadRequest, "failed to read payload")
+	}
+	if len(b) == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, "empty payload")
+	}
+
+	contentType := c.Request().Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	job := Job{ContentType: contentType, Payload: b}
 	select {
-	case jobs <- Job{
-		ContentType: c.Request().Header.Get("Content-Type"),
-		Payload:     b,
-	}:
+	case jobs <- job:
 	default:
-		return fmt.Errorf("Job queue full")
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "job queue full")
 	}
-
 	return c.NoContent(http.StatusCreated)
 }
 
 func getJob(c echo.Context) error {
-	c.Response().Header().Set("Cache-Control", "no-cache")
-	c.Response().Header().Set("Connection", "keep-alive")
-	c.Response().Flush()
-
 	jobs := jobQueue.Get(c.Param("printer"))
 	if jobs == nil {
-		return c.String(http.StatusNotFound, "Printer not found")
+		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
 	}
+
+	c.Response().Header().Set("Cache-Control", "no-cache")
+	t := time.NewTimer(pollTimeout)
+	defer t.Stop()
 
 	select {
 	case <-c.Request().Context().Done():
 		return nil
+	case <-shutdownCh:
+		return c.NoContent(http.StatusNoContent)
+	case <-t.C:
+		return c.NoContent(http.StatusNoContent)
 	case j := <-jobs:
 		return c.Blob(http.StatusOK, j.ContentType, j.Payload)
 	}
@@ -56,7 +77,7 @@ func getJob(c echo.Context) error {
 
 func deleteJobs(c echo.Context) error {
 	if jobQueue.Get(c.Param("printer")) == nil {
-		return c.String(http.StatusNotFound, "Printer not found")
+		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
 	}
 	jobQueue.Clear(c.Param("printer"))
 	return c.NoContent(http.StatusNoContent)
