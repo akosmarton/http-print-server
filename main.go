@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"os"
@@ -35,12 +36,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	for printer := range strings.SplitSeq(printers, " ") {
+	for _, printer := range strings.Fields(printers) {
 		jobQueue.Init(printer)
 		slog.Info("Queue initialized", "printer", printer)
 	}
 
 	e := echo.New()
+	e.Server.ReadHeaderTimeout = 10 * time.Second
+	e.Server.IdleTimeout = 120 * time.Second
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
 		Skipper: func(c echo.Context) bool {
 			return c.Path() == "/health"
@@ -77,7 +80,7 @@ func main() {
 
 	e.GET("/health", healthHandler)
 	api := e.Group("/api", middleware.KeyAuth(func(key string, c echo.Context) (bool, error) {
-		return key == apiKey, nil
+		return subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) == 1, nil
 	}))
 	api.GET("/printers/:printer", getJob)
 	api.POST("/printers/:printer", postJob)
@@ -93,6 +96,7 @@ func main() {
 	q := make(chan os.Signal, 1)
 	signal.Notify(q, os.Interrupt, syscall.SIGTERM)
 	<-q
+	close(shutdownCh)
 	slog.Info("Shutting down server...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
