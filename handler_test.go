@@ -219,3 +219,34 @@ func TestGetJobNotOrphanedByClear(t *testing.T) {
 		t.Fatal("long-poll was orphaned by Clear")
 	}
 }
+
+// Regression for the early-flush bug: flushing before the poll decides writes the
+// status line to the wire while echo still considers the response uncommitted, so
+// the job/idle write is dropped as a superfluous WriteHeader and the job loses the
+// Content-Type set by the delivery. See AGENTS.md invariant 3.
+func TestGetJobDoesNotFlushBeforeDeciding(t *testing.T) {
+	newQueue(t, 4, "p")
+	pollTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { pollTimeout = 60 * time.Second })
+
+	c, rec := newContext(t, "GET", "p", nil, "")
+	call(t, getJob, c)
+	if rec.Flushed {
+		t.Fatal("idle poll flushed the response before deciding")
+	}
+	if rec.Code != 204 {
+		t.Fatalf("expected 204, got %d", rec.Code)
+	}
+
+	c, _ = newContext(t, "POST", "p", strings.NewReader("hello"), "text/plain")
+	call(t, postJob, c)
+
+	c, rec = newContext(t, "GET", "p", nil, "")
+	call(t, getJob, c)
+	if rec.Flushed {
+		t.Fatal("job delivery flushed the response before writing the job")
+	}
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "text/plain" {
+		t.Fatalf("expected 200 text/plain, got %d %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
