@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,9 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"golang.org/x/time/rate"
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
 )
 
 var jobQueue *JobQueue
@@ -42,19 +42,16 @@ func main() {
 	}
 
 	e := echo.New()
-	e.Server.ReadHeaderTimeout = 10 * time.Second
-	e.Server.IdleTimeout = 120 * time.Second
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-		Skipper: func(c echo.Context) bool {
+		Skipper: func(c *echo.Context) bool {
 			return c.Path() == "/health"
 		},
 		LogStatus:   true,
 		LogURI:      true,
-		LogError:    true,
 		LogMethod:   true,
 		LogRemoteIP: true,
 		LogLatency:  true,
-		LogValuesFunc: func(c echo.Context, v middleware.RequestLoggerValues) error {
+		LogValuesFunc: func(c *echo.Context, v middleware.RequestLoggerValues) error {
 			if v.Status < 500 {
 				slog.LogAttrs(context.Background(), slog.LevelInfo, "request",
 					slog.String("method", v.Method),
@@ -76,32 +73,42 @@ func main() {
 			return nil
 		},
 	}))
-	e.Use(middleware.Recover(), middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(rate.Limit(20))))
+	e.Use(middleware.Recover(), middleware.RateLimiter(middleware.NewRateLimiterMemoryStore(20)))
 
 	e.GET("/health", healthHandler)
-	api := e.Group("/api", middleware.KeyAuth(func(key string, c echo.Context) (bool, error) {
+	api := e.Group("/api", middleware.KeyAuth(func(c *echo.Context, key string, source middleware.ExtractorSource) (bool, error) {
 		return subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) == 1, nil
 	}))
 	api.GET("/printers/:printer", getJob)
 	api.POST("/printers/:printer", postJob)
 	api.DELETE("/printers/:printer", deleteJobs)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
-			slog.Error("Starting server", slog.Any("err", err))
-			os.Exit(1)
-		}
+		<-sigCh
+		slog.Info("Shutting down server...")
+		// Release parked long-polls with 204 before graceful shutdown drains the connections.
+		close(shutdownCh)
+		cancel()
 	}()
 
-	q := make(chan os.Signal, 1)
-	signal.Notify(q, os.Interrupt, syscall.SIGTERM)
-	<-q
-	close(shutdownCh)
-	slog.Info("Shutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := e.Shutdown(ctx); err != nil {
-		slog.Error("Shutting down server", slog.Any("err", err))
+	sc := echo.StartConfig{
+		Address:         ":" + port,
+		GracefulTimeout: 10 * time.Second,
+		BeforeServeFunc: func(s *http.Server) error {
+			// ReadTimeout/WriteTimeout would kill the 60 s long-poll.
+			s.ReadTimeout = 0
+			s.ReadHeaderTimeout = 10 * time.Second
+			s.IdleTimeout = 120 * time.Second
+			return nil
+		},
+	}
+	if err := sc.Start(ctx, e); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("Starting server", slog.Any("err", err))
 		os.Exit(1)
 	}
 }

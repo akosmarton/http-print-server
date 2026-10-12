@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 var (
@@ -15,12 +15,12 @@ var (
 	shutdownCh         = make(chan struct{})
 )
 
-func healthHandler(c echo.Context) error {
+func healthHandler(c *echo.Context) error {
 	c.Response().Header().Set("Cache-Control", "no-store, max-age=0")
 	return c.String(http.StatusOK, "OK")
 }
 
-func postJob(c echo.Context) error {
+func postJob(c *echo.Context) error {
 	jobs := jobQueue.Get(c.Param("printer"))
 	if jobs == nil {
 		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
@@ -53,7 +53,7 @@ func postJob(c echo.Context) error {
 	return c.NoContent(http.StatusCreated)
 }
 
-func getJob(c echo.Context) error {
+func getJob(c *echo.Context) error {
 	jobs := jobQueue.Get(c.Param("printer"))
 	if jobs == nil {
 		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
@@ -75,7 +75,7 @@ func getJob(c echo.Context) error {
 	}
 }
 
-func deleteJobs(c echo.Context) error {
+func deleteJobs(c *echo.Context) error {
 	if jobQueue.Get(c.Param("printer")) == nil {
 		return echo.NewHTTPError(http.StatusNotFound, "Printer not found")
 	}

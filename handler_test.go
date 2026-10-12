@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 // newQueue replaces the package-global queue. Tests must not use t.Parallel().
@@ -20,7 +20,7 @@ func newQueue(t *testing.T, capacity int, printers ...string) {
 	}
 }
 
-func newContext(t *testing.T, method, printer string, body io.Reader, contentType string) (echo.Context, *httptest.ResponseRecorder) {
+func newContext(t *testing.T, method, printer string, body io.Reader, contentType string) (*echo.Context, *httptest.ResponseRecorder) {
 	t.Helper()
 	req := httptest.NewRequest(method, "/", body)
 	if contentType != "" {
@@ -28,15 +28,14 @@ func newContext(t *testing.T, method, printer string, body io.Reader, contentTyp
 	}
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
-	c.SetParamNames("printer")
-	c.SetParamValues(printer)
+	c.SetPathValues(echo.PathValues{{Name: "printer", Value: printer}})
 	return c, rec
 }
 
-func call(t *testing.T, h echo.HandlerFunc, c echo.Context) {
+func call(t *testing.T, h echo.HandlerFunc, c *echo.Context) {
 	t.Helper()
 	if err := h(c); err != nil {
-		c.Echo().DefaultHTTPErrorHandler(err, c)
+		c.Echo().HTTPErrorHandler(c, err)
 	}
 }
 
@@ -196,10 +195,9 @@ func TestGetJobNotOrphanedByClear(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		rec := httptest.NewRecorder()
 		c := echo.New().NewContext(req, rec)
-		c.SetParamNames("printer")
-		c.SetParamValues("p")
+		c.SetPathValues(echo.PathValues{{Name: "printer", Value: "p"}})
 		if err := getJob(c); err != nil {
-			c.Echo().DefaultHTTPErrorHandler(err, c)
+			c.Echo().HTTPErrorHandler(c, err)
 		}
 		res <- rec
 	}()
